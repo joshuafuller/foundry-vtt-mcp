@@ -38,11 +38,12 @@ function getCommonComfyUIPaths(): string[] {
   } else if (isMac()) {
     const appSupport = `${home}/Library/Application Support`;
 
-    // Mac paths - ComfyUI Desktop and manual installs
+    // Mac paths - prioritize headless installer using system Python
     paths.push(
+      '/Applications/FoundryMCPServer.app/Contents/Resources/ComfyUI', // Headless install (uses system Python)
       `${appSupport}/FoundryMCPServer/ComfyUI-headless`,
       `${appSupport}/ComfyUI`,
-      '/Applications/ComfyUI.app/Contents/Resources/ComfyUI',
+      '/Applications/ComfyUI.app/Contents/Resources/ComfyUI', // Desktop app (legacy)
       `${home}/ComfyUI`,
       '/opt/ComfyUI',
       '/usr/local/ComfyUI'
@@ -101,13 +102,28 @@ export function isComfyUIDesktopInstalled(): boolean {
 
 /**
  * Get Python command for running ComfyUI on the current platform
+ * For headless installs, returns the path to the venv Python
  */
-export function getDefaultPythonCommand(): string {
+export function getDefaultPythonCommand(installPath?: string): string {
   if (isWindows()) {
     // Windows: embedded Python in ComfyUI directory
     return 'python/python.exe';
   } else if (isMac()) {
-    // Mac: system Python or ComfyUI Desktop's Python
+    // Mac: Check for headless venv first, then fall back to system Python 3.11
+    if (installPath) {
+      const venvPython = path.join(installPath, 'venv', 'bin', 'python');
+      if (fs.existsSync(venvPython)) {
+        return venvPython;
+      }
+    }
+
+    // Use system Python 3.11 installed by our installer
+    const systemPython311 = '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3';
+    if (fs.existsSync(systemPython311)) {
+      return systemPython311;
+    }
+
+    // Fallback to system Python
     return 'python3';
   } else {
     // Linux: system Python

@@ -838,11 +838,15 @@ export class QueryHandlers {
         throw new Error('Scene name is required and must be a string');
       }
 
+      // Get quality setting from module settings
+      const quality = game.settings.get(MODULE_ID, 'mapGenQuality') || 'low';
+
       const params = {
         prompt: data.prompt.trim(),
         scene_name: data.scene_name.trim(),
         size: data.size || 'medium',
-        grid_size: data.grid_size || 70
+        grid_size: data.grid_size || 70,
+        quality: quality
       };
 
       // Use ComfyUIManager to communicate with backend via WebSocket
@@ -1016,16 +1020,36 @@ export class QueryHandlers {
       // Create a File object from the Blob
       const file = new File([blob], safeFilename, { type: 'image/png' });
 
+      console.log(`[${MODULE_ID}] Ensuring upload directory exists...`);
+
+      // Upload to user data folder to avoid module update warnings
+      const uploadPath = 'ai-generated-maps';
+      try {
+        // Use the modern Foundry API (v13+) with fallback for older versions
+        const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+
+        await FilePickerAPI.createDirectory('data', uploadPath, { bucket: null });
+        console.log(`[${MODULE_ID}] Directory created/verified: ${uploadPath}`);
+      } catch (dirError: any) {
+        // Directory might already exist, that's okay
+        if (!dirError.message?.includes('EEXIST') && !dirError.message?.includes('already exists')) {
+          console.warn(`[${MODULE_ID}] Directory creation warning:`, dirError.message);
+        }
+      }
+
       console.log(`[${MODULE_ID}] Uploading to FilePicker...`);
-      // Upload using Foundry's FilePicker.upload method
-      const response = await (globalThis as any).FilePicker.upload(
+      // Upload using Foundry's FilePicker.upload method with modern API
+      const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+      const response = await FilePickerAPI.upload(
         'data',
-        'modules/foundry-mcp-bridge/generated-maps',
+        uploadPath,
         file,
         {},
         { notify: false }
       );
 
+      console.log(`[${MODULE_ID}] FilePicker.upload response:`, JSON.stringify(response, null, 2));
+      console.log(`[${MODULE_ID}] Response keys:`, Object.keys(response || {}));
       console.log(`[${MODULE_ID}] Uploaded generated map to:`, response.path);
 
       return {

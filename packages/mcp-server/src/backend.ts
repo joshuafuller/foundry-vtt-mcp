@@ -134,8 +134,7 @@ function acquireLock(): boolean {
 
             process.kill(lockPid, 0);
 
-            console.error(`Backend already running with PID ${lockPid}`);
-
+            // Backend already running - return false to exit gracefully
             return false;
 
           } catch {
@@ -482,37 +481,31 @@ async function stopComfyUIService(logger: Logger): Promise<any> {
 
 async function checkComfyUIStatus(): Promise<any> {
 
-  // Check process status first
+  // Always check if ComfyUI is actually responsive on port 31411
+  // This handles both spawned processes and externally-started instances
 
-  if (!comfyuiProcess || comfyuiProcess.killed) {
+  try {
 
-    comfyuiStatus = 'stopped';
+    const response = await fetch('http://127.0.0.1:31411/system_stats', {
 
-  }
+      signal: AbortSignal.timeout(5000)
 
-  // If status shows running, verify API is actually responsive
+    });
 
-  if (comfyuiStatus === 'running') {
+    if (response.ok) {
 
-    try {
+      comfyuiStatus = 'running';
 
-      const response = await fetch('http://127.0.0.1:31411/system_stats', {
-
-        signal: AbortSignal.timeout(5000)
-
-      });
-
-      if (!response.ok) {
-
-        comfyuiStatus = 'error';
-
-      }
-
-    } catch (error) {
+    } else {
 
       comfyuiStatus = 'error';
 
     }
+
+  } catch (error) {
+
+    // ComfyUI is not responsive on port 31411
+    comfyuiStatus = 'stopped';
 
   }
 
@@ -571,7 +564,8 @@ async function handleGenerateMapRequest(message: any, jobQueue: any, comfyuiClie
       prompt: data.prompt.trim(),
       scene_name: data.scene_name.trim(),
       size: data.size || 'medium',
-      grid_size: data.grid_size || 70
+      grid_size: data.grid_size || 70,
+      quality: data.quality || 'low'
     };
 
     // Create job using mapgen's JobQueue
@@ -587,7 +581,7 @@ async function handleGenerateMapRequest(message: any, jobQueue: any, comfyuiClie
       status: 'success',
       jobId: jobId,
       message: 'Map generation started',
-      estimatedTime: '30-90 seconds'
+      estimatedTime: 'varies by hardware and quality setting'
     };
 
   } catch (error: any) {
@@ -638,7 +632,7 @@ async function handleCheckMapStatusRequest(data: any, jobQueue: any, logger: Log
   }
 }
 
-async function handleCancelMapJobRequest(data: any, jobQueue: any, logger: Logger): Promise<any> {
+async function handleCancelMapJobRequest(data: any, jobQueue: any, comfyuiClient: any, logger: Logger): Promise<any> {
   try {
     if (!data) {
       throw new Error('Request data is required');
@@ -648,6 +642,27 @@ async function handleCancelMapJobRequest(data: any, jobQueue: any, logger: Logge
       throw new Error('Job ID is required');
     }
 
+    // Get the job to find ComfyUI prompt_id
+    const job = await jobQueue.getJob(jobId);
+    if (!job) {
+      return {
+        status: 'error',
+        message: 'Job not found'
+      };
+    }
+
+    // Cancel in ComfyUI if we have a prompt_id
+    if (job.comfyui_job_id) {
+      logger.info('Cancelling ComfyUI job', { jobId, promptId: job.comfyui_job_id });
+      const comfyuiCancelled = await comfyuiClient.cancelJob(job.comfyui_job_id);
+      if (comfyuiCancelled) {
+        logger.info('ComfyUI job interrupted successfully', { jobId, promptId: job.comfyui_job_id });
+      } else {
+        logger.warn('Failed to interrupt ComfyUI job', { jobId, promptId: job.comfyui_job_id });
+      }
+    }
+
+    // Mark job as cancelled in our queue
     const cancelled = await jobQueue.cancelJob(jobId);
 
     return {
@@ -717,12 +732,29 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
     // Submit to ComfyUI (using mapgen's client)
     await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Submitting job to ComfyUI...\n`);
     const sizePixels = comfyuiClient.getSizePixels(job.params.size as any);
-    const comfyuiJob = await comfyuiClient.submitJob({
-      prompt: job.params.prompt,
-      width: sizePixels,
-      height: sizePixels
-    });
-    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] ComfyUI job submitted: ${comfyuiJob.prompt_id}\n`);
+    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Size pixels: ${sizePixels}\n`);
+
+    let comfyuiJob;
+    try {
+      comfyuiJob = await comfyuiClient.submitJob({
+        prompt: job.params.prompt,
+        width: sizePixels,
+        height: sizePixels,
+        quality: job.params.quality
+      });
+      await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] ComfyUI job submitted: ${comfyuiJob.prompt_id}\n`);
+
+      // Store ComfyUI prompt_id in job for cancellation support
+      const currentJob = await jobQueue.getJob(jobId);
+      if (currentJob) {
+        currentJob.comfyui_job_id = comfyuiJob.prompt_id;
+      }
+
+    } catch (submitError: any) {
+      await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] ERROR submitting to ComfyUI: ${submitError.message}\n`);
+      await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Error stack: ${submitError.stack}\n`);
+      throw submitError;
+    }
 
     // Wait for completion (mapgen style)
     await jobQueue.updateJobProgress(jobId, 50, 'Generating battlemap...');
@@ -733,7 +765,37 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
       stage: 'Generating battlemap...'
     });
 
-    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Starting status polling...\n`);
+    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Starting status polling with WebSocket progress...\n`);
+
+    // Register WebSocket callback for real-time progress updates
+    comfyuiClient.registerProgressCallback(comfyuiJob.prompt_id, (progress: { currentStep: number; totalSteps: number }) => {
+      const { currentStep, totalSteps } = progress;
+      const progressPercent = Math.floor((currentStep / totalSteps) * 100);
+
+      logger.info('Real-time progress update from ComfyUI', {
+        jobId,
+        promptId: comfyuiJob.prompt_id,
+        currentStep,
+        totalSteps,
+        progressPercent
+      });
+
+      // Send progress update to Foundry
+      foundryClient.sendMessage({
+        type: 'map-generation-progress',
+        data: {
+          jobId: jobId,
+          progress: 50 + (progressPercent / 2), // Map 0-100% to 50-100% (since we're at 50% when generation starts)
+          status: 'AI generating battlemap...',
+          queueInfo: {
+            currentStep,
+            totalSteps,
+            estimatedTimeRemaining: undefined // WebSocket doesn't provide time estimates
+          }
+        }
+      });
+    });
+
     let status = await comfyuiClient.getJobStatus(comfyuiJob.prompt_id);
     logger.info('Initial job status', { jobId, promptId: comfyuiJob.prompt_id, status });
     await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Initial status: ${status}\n`);
@@ -743,21 +805,14 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
       pollCount++;
       logger.info('Polling job status', { jobId, promptId: comfyuiJob.prompt_id, pollCount, currentStatus: status });
 
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Check status every 5 seconds (WebSocket handles progress)
       status = await comfyuiClient.getJobStatus(comfyuiJob.prompt_id);
 
       logger.info('Job status after poll', { jobId, promptId: comfyuiJob.prompt_id, pollCount, newStatus: status });
-
-      if (status === 'running') {
-        await jobQueue.updateJobProgress(jobId, 70, 'AI generating battlemap...');
-        foundryClient.sendMessage({
-          type: 'map-generation-progress',
-          jobId: jobId,
-          progress: 70,
-          stage: 'AI generating battlemap...'
-        });
-      }
     }
+
+    // Unregister callback when done
+    comfyuiClient.unregisterProgressCallback(comfyuiJob.prompt_id);
 
     logger.info('Job polling completed', { jobId, promptId: comfyuiJob.prompt_id, finalStatus: status, totalPolls: pollCount });
     await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Polling complete, status: ${status}\n`);
@@ -846,6 +901,7 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
       });
 
       await debugLog(`Upload query completed - success: ${uploadResult.success}`);
+      await debugLog(`Full uploadResult: ${JSON.stringify(uploadResult)}`);
 
       if (!uploadResult.success) {
         await debugLog(`Upload failed - error: ${uploadResult.error}`);
@@ -856,7 +912,9 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
       throw error;
     }
 
+    await debugLog(`Extracting path from uploadResult...`);
     webPath = uploadResult.path;
+    await debugLog(`webPath extracted: ${webPath}`);
     logger.info('Image uploaded successfully to Foundry', { path: webPath });
 
     await jobQueue.updateJobProgress(jobId, 95, 'Creating scene data...');
@@ -933,6 +991,10 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
     logger.info('Map generation completed successfully', { jobId });
 
   } catch (error: any) {
+    // Log to debug file first
+    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] ERROR in processMapGenerationInBackend: ${error.message}\n`);
+    await fs2.appendFile(processDebugLog, `[${new Date().toISOString()}] Error stack: ${error.stack}\n`);
+
     logger.error('Background map generation processing failed', { jobId, error });
     await jobQueue.markJobFailed(jobId, error.message);
 
@@ -1013,6 +1075,22 @@ async function startBackend(): Promise<void> {
     });
 
     logger.info('Map generation backend components initialized (ComfyUI on localhost:31411)');
+
+    // Auto-start ComfyUI if installed and autoStart is enabled
+    if (mapGenerationComfyUIClient && (mapGenerationComfyUIClient as any).config?.autoStart) {
+      const isInstalled = await (mapGenerationComfyUIClient as any).checkInstallation();
+      if (isInstalled) {
+        logger.info('Auto-starting ComfyUI service...');
+        try {
+          await (mapGenerationComfyUIClient as any).startService();
+          logger.info('ComfyUI service auto-started successfully');
+        } catch (error) {
+          logger.warn('Failed to auto-start ComfyUI service', { error });
+        }
+      } else {
+        logger.info('ComfyUI not installed, skipping auto-start');
+      }
+    }
   } catch (error) {
     logger.warn('Failed to initialize map generation components', { error });
   }
@@ -1084,7 +1162,7 @@ async function startBackend(): Promise<void> {
 
           case 'cancel-map-job-request':
 
-            result = await handleCancelMapJobRequest(message.data, mapGenerationJobQueue, logger);
+            result = await handleCancelMapJobRequest(message.data, mapGenerationJobQueue, mapGenerationComfyUIClient, logger);
 
             break;
 
@@ -1530,9 +1608,19 @@ async function startBackend(): Promise<void> {
 
 }
 
+// Check lock BEFORE any async operations
+// If another instance is running, wait forever silently (don't exit)
+// This prevents Claude Desktop from seeing a "server closed" error
+const hasLock = acquireLock();
+
 (async function main() {
 
-  if (!acquireLock()) process.exit(0);
+  if (!hasLock) {
+    // Another backend is running - wait forever without doing anything
+    // This keeps the process alive so Claude doesn't see an error
+    await new Promise(() => {}); // Never resolves
+    return;
+  }
 
   process.on('exit', releaseLock);
 

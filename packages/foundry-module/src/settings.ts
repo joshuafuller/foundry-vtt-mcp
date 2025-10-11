@@ -77,6 +77,7 @@ export class ModuleSettings {
         getData(): any {
           return {
             autoStartService: game.settings.get(MODULE_ID, 'mapGenAutoStart') || true,
+            mapGenQuality: game.settings.get(MODULE_ID, 'mapGenQuality') || 'low',
             connectionStatus: this.getConnectionStatus(),
             connectionStatusText: this.getConnectionStatusText()
           };
@@ -172,6 +173,7 @@ export class ModuleSettings {
 
         async _updateObject(_event: Event, formData: any) {
           await game.settings.set(MODULE_ID, 'mapGenAutoStart', formData.autoStartService);
+          await game.settings.set(MODULE_ID, 'mapGenQuality', formData.mapGenQuality);
           ui.notifications?.info('Map generation service settings saved successfully');
         }
       },
@@ -285,6 +287,20 @@ export class ModuleSettings {
       config: false, // Hidden from main config, accessible via submenu only
       type: Boolean,
       default: true,
+    });
+
+    game.settings.register(this.moduleId, 'mapGenQuality', {
+      name: 'Generation Quality',
+      hint: 'Higher quality = better detail but slower generation. Generation time depends on your hardware.',
+      scope: 'world',
+      config: false, // Hidden from main config, accessible via submenu only
+      type: String,
+      choices: {
+        'low': 'Low',
+        'medium': 'Medium',
+        'high': 'High'
+      },
+      default: 'low',
     });
 
     // ============================================================================

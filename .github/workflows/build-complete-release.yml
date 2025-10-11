@@ -225,52 +225,252 @@ jobs:
         name: foundry-mcp-server-installer-${{ env.PACKAGE_VERSION }}
         path: installer/build/FoundryMCPServer-Setup-${{ env.PACKAGE_VERSION }}.exe
         retention-days: 30
-        
-    - name: Create Release with All Assets (on tag)
-      if: startsWith(github.ref, 'refs/tags/v')
+
+  build-mac-pkg:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.12.2'
+
+    - name: Set Package Version
+      id: version
+      run: |
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+          echo "✓ Using manual input version: $VERSION"
+
+          # Validate version format
+          if ! echo "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "❌ Invalid version format: '$VERSION'. Expected format: v0.0.0 or 0.0.0"
+            exit 1
+          fi
+        elif [ "${{ github.ref_type }}" = "tag" ]; then
+          VERSION="${{ github.ref_name }}"
+          echo "✓ Using tag version: $VERSION"
+
+          # Validate tag version format
+          if ! echo "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "❌ Invalid tag version format: '$VERSION'. Expected format: v0.0.0"
+            exit 1
+          fi
+        else
+          echo "📋 Reading version from package.json..."
+
+          # Check if package.json exists
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json not found in repository root"
+            exit 1
+          fi
+
+          # Read and parse package.json (using node for JSON parsing)
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+          # Validate version field exists
+          if [ -z "$PACKAGE_VERSION" ]; then
+            echo "❌ No 'version' field found in package.json"
+            exit 1
+          fi
+
+          echo "📦 Found package.json version: $PACKAGE_VERSION"
+
+          # Validate version format
+          if ! echo "$PACKAGE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "❌ Invalid package.json version format: '$PACKAGE_VERSION'. Expected format: 0.0.0"
+            exit 1
+          fi
+
+          VERSION="v$PACKAGE_VERSION"
+          echo "✓ Using package.json version: $VERSION"
+        fi
+
+        echo "🎯 Final PACKAGE_VERSION: $VERSION"
+        echo "PACKAGE_VERSION=$VERSION" >> $GITHUB_ENV
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Install workspace dependencies (CI)
+      run: npm ci --workspaces --include-workspace-root
+
+    - name: Build shared types
+      run: npm run build --workspace=shared
+
+    - name: Build MCP Server (Bundled)
+      run: npm run build:bundle --workspace=packages/mcp-server
+
+    - name: Build Foundry Module
+      run: npm run build --workspace=packages/foundry-module
+
+    - name: Build Mac PKG Installer
+      run: |
+        cd installer
+        node build-mac-pkg.js
+
+    - name: Build Mac DMG Distribution
+      run: |
+        cd installer
+        node build-dmg.js
+
+    - name: Verify Mac DMG
+      run: |
+        cd installer/build
+        ls -lh
+        if [ -f "FoundryMCPServer-${{ env.PACKAGE_VERSION }}.dmg" ]; then
+          echo "✓ Mac DMG distribution found"
+          SIZE=$(du -h "FoundryMCPServer-${{ env.PACKAGE_VERSION }}.dmg" | cut -f1)
+          echo "📊 DMG size: $SIZE"
+        else
+          echo "❌ Mac DMG not found"
+          exit 1
+        fi
+
+    - name: Upload Mac DMG as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: foundry-mcp-server-dmg-${{ env.PACKAGE_VERSION }}
+        path: installer/build/FoundryMCPServer-${{ env.PACKAGE_VERSION }}.dmg
+        retention-days: 30
+
+  create-release:
+    needs: [build-nsis, build-mac-pkg]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set Package Version
+      id: version
+      run: |
+        VERSION="${{ github.ref_name }}"
+        # Remove 'v' prefix for filenames if present
+        PACKAGE_VERSION="${VERSION#v}"
+        echo "PACKAGE_VERSION=v$PACKAGE_VERSION" >> $GITHUB_ENV
+        echo "version=v$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Download Windows installer artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: foundry-mcp-server-installer-${{ env.PACKAGE_VERSION }}
+        path: installer/build/
+
+    - name: Download Mac DMG artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: foundry-mcp-server-dmg-${{ env.PACKAGE_VERSION }}
+        path: installer/build/
+
+    - name: Create Foundry Module ZIP
+      run: |
+        cd packages/foundry-module
+        zip -r ../../foundry-vtt-mcp.zip . -x ".*" -x "node_modules/*"
+        cd ../..
+        ls -lh foundry-vtt-mcp.zip
+
+    - name: Create Standalone MCP Server ZIP
+      run: |
+        mkdir -p standalone-mcp-server
+        cp packages/mcp-server/dist/index.bundle.cjs standalone-mcp-server/index.js
+
+        # Create package.json
+        cat > standalone-mcp-server/package.json << EOF
+        {
+          "name": "foundry-mcp-server",
+          "version": "${{ env.PACKAGE_VERSION }}",
+          "description": "Foundry VTT MCP Server - Standalone Installation",
+          "main": "index.js",
+          "scripts": {
+            "start": "node index.js"
+          },
+          "engines": {
+            "node": ">=18.0.0"
+          }
+        }
+        EOF
+
+        # Create README
+        cat > standalone-mcp-server/README.md << EOF
+        # Foundry MCP Server - Manual Installation
+
+        This package contains the standalone MCP server for manual installation on any platform.
+
+        ## Requirements
+        - Node.js 18.0.0 or later
+        - Foundry VTT with MCP Bridge module installed
+
+        ## Installation
+        1. Extract this ZIP to your desired location
+        2. Run: npm start or node index.js
+        3. Configure Claude Desktop to connect to this server
+        4. Install the MCP Bridge module in Foundry VTT
+
+        For full documentation visit: https://github.com/adambdooley/foundry-vtt-mcp
+
+        Version: ${{ env.PACKAGE_VERSION }}
+        EOF
+
+        zip -r foundry-mcp-server-${{ env.PACKAGE_VERSION }}.zip standalone-mcp-server
+        rm -rf standalone-mcp-server
+        ls -lh foundry-mcp-server-${{ env.PACKAGE_VERSION }}.zip
+
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.ref_name }}
         name: Foundry MCP Server ${{ github.ref_name }}
         body: |
           ## Foundry MCP Server ${{ github.ref_name }}
-          
+
           Complete multi-platform distribution for Foundry MCP Server - AI-powered campaign management for Foundry VTT using Claude Desktop.
-          
+
           ### 📦 Installation Options
-          
-          **Windows Users (Recommended):**
+
+          **Windows Users:**
           - Download `FoundryMCPServer-Setup-${{ github.ref_name }}.exe`
           - Run installer (no admin rights required)
           - Automatic Claude Desktop configuration
-          
+
+          **Mac Users:**
+          - Download `FoundryMCPServer-${{ github.ref_name }}.dmg`
+          - Open DMG and double-click the PKG installer
+          - Choose components: MCP Server (required), Foundry Module, ComfyUI AI Maps
+          - Automatic Claude Desktop configuration
+          - To uninstall: Double-click `Uninstall.tool` from the DMG
+
           **Manual Installation (All Platforms):**
           - Download `foundry-mcp-server-${{ github.ref_name }}.zip`
           - Extract and run with Node.js 18+
           - Manual Claude Desktop configuration required
-          
+
           **Foundry VTT Users:**
           - Install directly from Foundry's module browser
           - Or use manifest: `https://raw.githubusercontent.com/adambdooley/foundry-vtt-mcp/master/packages/foundry-module/module.json`
-          
+
           ### 🚀 Quick Start
           1. Choose your installation method above
           2. Install MCP Bridge module in Foundry VTT
           3. Restart Claude Desktop
           4. Start creating AI-powered campaigns!
-          
+
           ### 📋 Features
-          - 20 MCP tools for comprehensive Foundry VTT integration
+          - 25 MCP tools for comprehensive Foundry VTT integration
           - Actor creation with natural language processing
           - Quest management with HTML generation and updates
           - Campaign system with multi-part structure and progress tracking
           - Dice roll coordination between Claude and Foundry players
           - Actor ownership management with bulk operations
           - Enhanced creature index for instant monster searches
-          
+          - AI-powered battlemap generation with ComfyUI integration
+
           For full documentation, visit: https://github.com/adambdooley/foundry-vtt-mcp
         files: |
           installer/build/FoundryMCPServer-Setup-${{ env.PACKAGE_VERSION }}.exe
+          installer/build/FoundryMCPServer-${{ env.PACKAGE_VERSION }}.dmg
           foundry-vtt-mcp.zip
           foundry-mcp-server-${{ env.PACKAGE_VERSION }}.zip
           packages/foundry-module/module.json
@@ -279,83 +479,58 @@ jobs:
         prerelease: false
 
     - name: Update Foundry VTT Package Registry
-      if: startsWith(github.ref, 'refs/tags/v')
       run: |
-        Write-Host "🔄 Updating Foundry VTT Package Registry..."
-        
+        echo "🔄 Updating Foundry VTT Package Registry..."
+
         # Extract package information
-        $packageJson = Get-Content "packages\foundry-module\module.json" -Raw | ConvertFrom-Json
-        $packageId = $packageJson.id
-        $version = "${{ env.PACKAGE_VERSION }}".TrimStart('v')
-        $manifestUrl = "https://github.com/adambdooley/foundry-vtt-mcp/releases/download/${{ github.ref_name }}/module.json"
-        $releaseNotesUrl = "https://github.com/adambdooley/foundry-vtt-mcp/releases/tag/${{ github.ref_name }}"
-        
-        Write-Host "📦 Package ID: $packageId"
-        Write-Host "📝 Version: $version"  
-        Write-Host "📎 Manifest URL: $manifestUrl"
-        Write-Host "📋 Release Notes: $releaseNotesUrl"
-        
-        # Check if this is a dry run
-        $isDryRun = '${{ github.event.inputs.dry_run_foundry }}' -eq 'true'
-        if ($isDryRun) {
-          Write-Host "🧪 DRY RUN MODE: Testing API call without updating registry"
-        }
-        
+        PACKAGE_ID=$(node -p "require('./packages/foundry-module/module.json').id")
+        VERSION="${{ env.PACKAGE_VERSION }}"
+        VERSION="${VERSION#v}"  # Remove v prefix
+        MANIFEST_URL="https://github.com/adambdooley/foundry-vtt-mcp/releases/download/${{ github.ref_name }}/module.json"
+        RELEASE_NOTES_URL="https://github.com/adambdooley/foundry-vtt-mcp/releases/tag/${{ github.ref_name }}"
+
+        MINIMUM=$(node -p "require('./packages/foundry-module/module.json').compatibility.minimum")
+        VERIFIED=$(node -p "require('./packages/foundry-module/module.json').compatibility.verified")
+        MAXIMUM=$(node -p "require('./packages/foundry-module/module.json').compatibility.maximum")
+
+        echo "📦 Package ID: $PACKAGE_ID"
+        echo "📝 Version: $VERSION"
+        echo "📎 Manifest URL: $MANIFEST_URL"
+        echo "📋 Release Notes: $RELEASE_NOTES_URL"
+
         # Prepare API request body
-        $requestBody = @{
-          id = $packageId
-          release = @{
-            version = $version
-            manifest = $manifestUrl
-            notes = $releaseNotesUrl
-            compatibility = @{
-              minimum = $packageJson.compatibility.minimum
-              verified = $packageJson.compatibility.verified  
-              maximum = $packageJson.compatibility.maximum
+        REQUEST_BODY=$(cat <<EOF
+        {
+          "id": "$PACKAGE_ID",
+          "release": {
+            "version": "$VERSION",
+            "manifest": "$MANIFEST_URL",
+            "notes": "$RELEASE_NOTES_URL",
+            "compatibility": {
+              "minimum": "$MINIMUM",
+              "verified": "$VERIFIED",
+              "maximum": "$MAXIMUM"
             }
           }
         }
-        
-        # Add dry-run parameter if testing
-        if ($isDryRun) {
-          $requestBody['dry-run'] = $true
-        }
-        
-        $requestBodyJson = $requestBody | ConvertTo-Json -Depth 3
-        
-        Write-Host "🔧 Request Body:"
-        Write-Host $requestBodyJson
-        
-        try {
-          # Make API call to Foundry VTT Package Registry
-          $headers = @{
-            'Content-Type' = 'application/json'
-            'Authorization' = '${{ secrets.FOUNDRY_PACKAGE_RELEASE_TOKEN }}'
-          }
-          
-          $response = Invoke-RestMethod -Uri "https://foundryvtt.com/_api/packages/release_version/" -Method POST -Headers $headers -Body $requestBodyJson
-          
-          Write-Host "✅ Successfully updated Foundry VTT Package Registry"
-          Write-Host "📄 Response: $($response | ConvertTo-Json -Depth 2)"
-          
-        } catch {
-          Write-Host "❌ Failed to update Foundry VTT Package Registry"
-          
-          # Mask any potential token exposure in error messages
-          $errorMessage = $_.Exception.Message -replace 'fvttp_[A-Za-z0-9]+', '***MASKED***'
-          Write-Host "🔍 Error: $errorMessage"
-          
-          if ($_.Exception.Response) {
-            $errorResponse = $_.Exception.Response.GetResponseStream()
-            $reader = New-Object System.IO.StreamReader($errorResponse)
-            $errorBody = $reader.ReadToEnd()
-            # Mask any potential token in error response
-            $safeErrorBody = $errorBody -replace 'fvttp_[A-Za-z0-9]+', '***MASKED***'
-            Write-Host "📄 Error Response: $safeErrorBody"
-          }
-          
-          # Fail the workflow if Foundry registry update fails
-          Write-Host "🚨 Foundry Package Registry update is required for complete release"
-          exit 1
-        }
+        EOF
+        )
 
+        echo "🔧 Request Body:"
+        echo "$REQUEST_BODY"
+
+        # Make API call to Foundry VTT Package Registry
+        RESPONSE=$(curl -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: ${{ secrets.FOUNDRY_PACKAGE_RELEASE_TOKEN }}" \
+          -d "$REQUEST_BODY" \
+          https://foundryvtt.com/_api/packages/release_version/)
+
+        if [ $? -eq 0 ]; then
+          echo "✅ Successfully updated Foundry VTT Package Registry"
+          echo "📄 Response: $RESPONSE"
+        else
+          echo "❌ Failed to update Foundry VTT Package Registry"
+          echo "🔍 Error: $RESPONSE"
+          exit 1
+        fi

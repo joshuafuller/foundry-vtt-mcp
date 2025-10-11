@@ -39,6 +39,18 @@
         <strong>Auto-start Map Generation Service</strong> — Automatically start ComfyUI when Foundry loads.
       </span>
     </label>
+
+    <div class="form-group">
+      <label for="mapGenQuality">
+        <strong>Generation Quality</strong>
+      </label>
+      <select name="mapGenQuality" id="mapGenQuality">
+        <option value="low" {{#if (eq mapGenQuality "low")}}selected{{/if}}>Low</option>
+        <option value="medium" {{#if (eq mapGenQuality "medium")}}selected{{/if}}>Medium</option>
+        <option value="high" {{#if (eq mapGenQuality "high")}}selected{{/if}}>High</option>
+      </select>
+      <p class="notes">Higher quality = better detail but slower generation. Generation time depends on your hardware.</p>
+    </div>
   </section>
 
   <hr class="eci-divider"/>

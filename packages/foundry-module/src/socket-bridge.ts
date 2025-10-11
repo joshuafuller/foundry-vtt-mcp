@@ -207,10 +207,52 @@ export class SocketBridge {
         });
       } else if (message.type === 'job-completed') {
         await this.handleJobCompleted(message.data);
+      } else if (message.type === 'map-generation-progress') {
+        this.handleProgressUpdate(message.data);
       }
     } catch (error) {
-      console.error(`[foundry-mcp-bridge] ERROR in handleJobCompleted:`, error);
+      console.error(`[foundry-mcp-bridge] ERROR in handleMessage:`, error);
       this.log(`Error handling message: ${error}`);
+    }
+  }
+
+  private handleProgressUpdate(data: any): void {
+    try {
+      if (!data) {
+        // Silently ignore empty progress updates (can happen during initialization)
+        return;
+      }
+      const { progress, status, queueInfo } = data;
+
+      // Build progress message
+      let message = `🎨 Generating battlemap: ${progress}%`;
+
+      if (queueInfo) {
+        const { currentStep, totalSteps, estimatedTimeRemaining } = queueInfo;
+        if (currentStep !== undefined && totalSteps !== undefined) {
+          message += ` (Step ${currentStep}/${totalSteps})`;
+        }
+        if (estimatedTimeRemaining) {
+          const minutes = Math.floor(estimatedTimeRemaining / 60);
+          const seconds = Math.floor(estimatedTimeRemaining % 60);
+          if (minutes > 0) {
+            message += ` - ${minutes}m ${seconds}s remaining`;
+          } else {
+            message += ` - ${seconds}s remaining`;
+          }
+        }
+      }
+
+      if (status) {
+        message += ` - ${status}`;
+      }
+
+      // Show as banner notification
+      ui.notifications?.info(message);
+
+      this.log(`Progress: ${message}`);
+    } catch (error) {
+      console.error(`[foundry-mcp-bridge] Error handling progress update:`, error);
     }
   }
 

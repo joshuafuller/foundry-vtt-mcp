@@ -15,10 +15,18 @@ USER_HOME=$(eval echo ~$CURRENT_USER)
 CLAUDE_CONFIG_DIR="$USER_HOME/Library/Application Support/Claude"
 CLAUDE_CONFIG="$CLAUDE_CONFIG_DIR/claude_desktop_config.json"
 APP_BUNDLE="/Applications/FoundryMCPServer.app"
-LAUNCH_SCRIPT="$APP_BUNDLE/Contents/MacOS/FoundryMCPServer"
+MCP_SERVER_BUNDLE="$APP_BUNDLE/Contents/Resources/foundry-mcp-server/backend.bundle.cjs"
+MCP_APP_SUPPORT="$USER_HOME/Library/Application Support/FoundryMCPServer"
 
 echo "User: $CURRENT_USER"
 echo "Home: $USER_HOME"
+
+# Create MCP Server app support directory for logs
+if [ ! -d "$MCP_APP_SUPPORT" ]; then
+  mkdir -p "$MCP_APP_SUPPORT"
+  chown "$CURRENT_USER:staff" "$MCP_APP_SUPPORT"
+  echo "✅ Created MCP Server app support directory"
+fi
 
 # Create Claude config directory if it doesn't exist
 if [ ! -d "$CLAUDE_CONFIG_DIR" ]; then
@@ -36,8 +44,15 @@ fi
 cat > "$CLAUDE_CONFIG" << EOF
 {
   "mcpServers": {
-    "foundry-mcp-server": {
-      "command": "$LAUNCH_SCRIPT"
+    "foundry-vtt-mcp": {
+      "command": "node",
+      "args": [
+        "$MCP_SERVER_BUNDLE"
+      ],
+      "env": {
+        "FOUNDRY_HOST": "localhost",
+        "FOUNDRY_PORT": "31415"
+      }
     }
   }
 }
@@ -107,13 +122,59 @@ if [ -z "$FOUNDRY_FOUND" ]; then
 fi
 
 echo ""
-echo "🎉 Installation complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📦 Installing ComfyUI (this will take 20-30 minutes)..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "This will download and install:"
+echo "  - Python 3.11 (system installation)"
+echo "  - ComfyUI headless server"
+echo "  - PyTorch with MPS support (Apple Silicon GPU)"
+echo "  - D&D Battlemaps SDXL Model (6.5GB)"
+echo "  - SDXL VAE (335MB)"
+echo "  Total: ~8GB download + 15GB installed"
+echo ""
+
+# Run ComfyUI setup script as the current user
+SETUP_SCRIPT="$APP_BUNDLE/Contents/Resources/setup-comfyui-headless.js"
+
+if [ -f "$SETUP_SCRIPT" ]; then
+  # Check if node is available
+  if command -v node >/dev/null 2>&1; then
+    echo "Running ComfyUI setup..."
+    # Run as the user who installed, not as root
+    su "$CURRENT_USER" -c "node '$SETUP_SCRIPT'" || {
+      echo "⚠️  ComfyUI setup encountered an error"
+      echo "You can run the setup manually later:"
+      echo "  cd /Applications/FoundryMCPServer.app/Contents/Resources"
+      echo "  node setup-comfyui-headless.js"
+      echo ""
+      echo "Installation log: $USER_HOME/foundry-mcp-install.log"
+    }
+  else
+    echo "⚠️  Node.js not found - cannot run ComfyUI setup automatically"
+    echo "Please install Node.js from https://nodejs.org/"
+    echo "Then run: node '$SETUP_SCRIPT'"
+  fi
+else
+  echo "⚠️  Setup script not found at: $SETUP_SCRIPT"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🎉 Installation Complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Next steps:"
 echo "1. Restart Claude Desktop"
-echo "2. Open Foundry VTT"
-echo "3. Enable the 'Foundry MCP Bridge' module"
-echo "4. Configure connection in module settings"
+echo "2. Launch Foundry VTT"
+echo "3. Enable 'Foundry MCP Bridge' in Module Management"
+echo ""
+echo "Optional:"
+echo "- Check settings in Foundry MCP Bridge module"
+echo "- View install log: $USER_HOME/foundry-mcp-install.log"
+echo ""
+echo "Documentation: https://github.com/adambdooley/foundry-vtt-mcp"
 echo ""
 
 exit 0

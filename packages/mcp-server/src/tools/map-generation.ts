@@ -76,7 +76,7 @@ export class MapGenerationTools {
       },
       {
         name: 'check-map-status',
-        description: 'Check status of map generation job (WAIT 25-40 seconds after starting before first check)',
+        description: 'Check status of map generation job. Progress updates appear automatically in Foundry VTT. DO NOT check frequently - this wastes tokens. Only check if user explicitly asks for status.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -209,7 +209,7 @@ export class MapGenerationTools {
       }
 
       const jobId = response?.jobId ?? 'unknown';
-      const estimatedTime = response?.estimatedTime ?? '30-90 seconds';
+      const estimatedTime = response?.estimatedTime ?? 'varies by hardware and quality setting';
       const lines = [
         `Map generation started. Job ID: ${jobId}`,
         '',
@@ -217,9 +217,11 @@ export class MapGenerationTools {
         `Size: ${params.size} (${this.getSizePixels(params.size)})`,
         `Grid size: ${params.grid_size}px`,
         '',
-        `Estimated time: ${estimatedTime}`,
-        'Wait at least 25 seconds before calling check-map-status.',
-        `Use job_id "${jobId}" when checking status.`,
+        `Generation time: ${estimatedTime}`,
+        '',
+        'Progress updates will appear automatically in Foundry VTT.',
+        'Once complete, the map will be imported as a new scene.',
+        'Do NOT check status frequently - this wastes tokens.',
       ];
 
       return lines.join('\n');
@@ -319,154 +321,6 @@ export class MapGenerationTools {
     const counter = this.jobIdCounter.toString(36);
     const random = Math.random().toString(36).substring(2, 8);
     return `job_${timestamp}_${counter}_${random}`;
-  }
-
-  private async submitComfyUIJob(input: { prompt: string; width: number; height: number }): Promise<any> {
-    const workflow = this.buildWorkflow(input);
-
-    try {
-      const response = await fetch('http://127.0.0.1:31411/prompt', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: workflow,
-          client_id: `ai-maps-server-${Date.now()}`
-        }),
-        signal: AbortSignal.timeout(10000)
-      });
-
-      if (!response.ok) {
-        throw new Error(`ComfyUI API Error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      this.logger.info('ComfyUI job submitted', { promptId: data.prompt_id });
-
-      return data;
-    } catch (error) {
-      this.logger.error('Failed to submit job to ComfyUI', { error });
-      throw error;
-    }
-  }
-
-  private async getComfyUIJobStatus(promptId: string): Promise<'queued' | 'running' | 'complete' | 'failed'> {
-    try {
-      // Check history for completed jobs
-      const historyResponse = await fetch(`http://127.0.0.1:31411/history/${promptId}`, {
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (historyResponse.ok) {
-        const historyData = await historyResponse.json();
-        if (historyData && Object.keys(historyData).length > 0) {
-          return 'complete';
-        }
-      }
-
-      // Check queue for pending/running jobs
-      const queueResponse = await fetch(`http://127.0.0.1:31411/queue`, {
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (!queueResponse.ok) {
-        return 'failed';
-      }
-
-      const queueData = await queueResponse.json();
-
-      // Check running queue
-      if (queueData.queue_running && queueData.queue_running.some((item: any) => item[1] === promptId)) {
-        return 'running';
-      }
-
-      // Check pending queue
-      if (queueData.queue_pending && queueData.queue_pending.some((item: any) => item[1] === promptId)) {
-        return 'queued';
-      }
-
-      // Not found in any queue, might have failed or been removed
-      return 'failed';
-    } catch (error) {
-      this.logger.error('Failed to get job status from ComfyUI', { promptId, error });
-      return 'failed';
-    }
-  }
-
-  private buildWorkflow(input: { prompt: string; width: number; height: number }): Record<string, any> {
-    // Enhanced prompt for D&D Battlemaps SDXL
-    const enhancedPrompt = `2d DnD battlemap of ${input.prompt}, top-down view, overhead perspective, aerial`;
-
-    // Negative prompt optimized for battlemap generation
-    const negativePrompt = 'grid, low angle, isometric, oblique, horizon, text, watermark, logo, caption, people, creatures, monsters, blurry, artifacts';
-
-    return {
-      "1": { // CheckpointLoaderWithConfig
-        "inputs": {
-          "ckpt_name": "dDBattlemapsSDXL10_upscaleV10.safetensors",
-          "config_name": "dDBattlemapsSDXL10_upscaleV10.yaml"
-        },
-        "class_type": "CheckpointLoaderWithConfig"
-      },
-      "2": { // CLIP Text Encode (Positive)
-        "inputs": {
-          "text": enhancedPrompt,
-          "clip": ["1", 1]
-        },
-        "class_type": "CLIPTextEncode"
-      },
-      "3": { // CLIP Text Encode (Negative)
-        "inputs": {
-          "text": negativePrompt,
-          "clip": ["1", 1]
-        },
-        "class_type": "CLIPTextEncode"
-      },
-      "4": { // Empty Latent Image
-        "inputs": {
-          "width": input.width,
-          "height": input.height,
-          "batch_size": 1
-        },
-        "class_type": "EmptyLatentImage"
-      },
-      "5": { // KSampler
-        "inputs": {
-          "seed": Math.floor(Math.random() * 1000000),
-          "steps": 35, // SDXL optimized
-          "cfg": 10.0, // D&D Battlemaps SDXL guidelines
-          "denoise": 1.0,
-          "sampler_name": "dpmpp_2m",
-          "scheduler": "karras",
-          "model": ["1", 0],
-          "positive": ["2", 0],
-          "negative": ["3", 0],
-          "latent_image": ["4", 0]
-        },
-        "class_type": "KSampler"
-      },
-      "9": { // VAE Loader
-        "inputs": {
-          "vae_name": "sdxl_vae.safetensors"
-        },
-        "class_type": "VAELoader"
-      },
-      "6": { // VAE Decode
-        "inputs": {
-          "samples": ["5", 0],
-          "vae": ["9", 0]
-        },
-        "class_type": "VAEDecode"
-      },
-      "7": { // Save Image
-        "inputs": {
-          "filename_prefix": "battlemap",
-          "images": ["6", 0]
-        },
-        "class_type": "SaveImage"
-      }
-    };
   }
 
   async shutdown(): Promise<void> {
