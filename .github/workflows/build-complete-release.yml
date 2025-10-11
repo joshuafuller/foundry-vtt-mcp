@@ -305,6 +305,15 @@ jobs:
     - name: Build Foundry Module
       run: npm run build --workspace=packages/foundry-module
 
+    - name: Upload built packages as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: foundry-mcp-built-packages-${{ env.PACKAGE_VERSION }}
+        path: |
+          packages/mcp-server/dist/
+          packages/foundry-module/
+        retention-days: 1
+
     - name: Build Mac PKG Installer
       run: |
         cd installer
@@ -369,6 +378,12 @@ jobs:
       with:
         name: foundry-mcp-server-dmg-${{ env.PACKAGE_VERSION }}
         path: installer/build/
+
+    - name: Download built packages artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: foundry-mcp-built-packages-${{ env.PACKAGE_VERSION }}
+        path: ./
 
     - name: Create Foundry Module ZIP
       run: |
