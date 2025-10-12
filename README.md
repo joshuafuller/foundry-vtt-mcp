@@ -152,48 +152,6 @@ Once connected, ask Claude Desktop:
 
 ## Architecture
 
-┌──────────────┐
-│   Claude     │  MCP Protocol
-│   Desktop    │◄────────────────┐
-└──────────────┘                 │
-                                 │
-┌────────────────────────────────┴─────────────────────────────────┐
-│  MCP Server (Local Machine)                                      │
-│                                                                  │
-│  ┌──────────────┐  TCP      ┌─────────────────────────────────┐  │
-│  │  index.cjs   │◄─────────►│   backend.bundle.cjs            │  │
-│  │  (Wrapper)   │  :31414   │   • 25 MCP Tools                │  │
-│  └──────────────┘           │   • WebSocket Server :31415     │  │
-│                             │   • ComfyUI Client              │  │
-│                             └────────┬────────────────────────┘  │
-│                                      │                           │
-│                                      │ HTTP + WebSocket          │
-│                                      ▼ :31411                    │
-│                             ┌────────────────────────────────┐   │
-│                             │  ComfyUI Service               │   │
-│                             │  • SDXL Map Generation         │   │
-│                             │  • Real-time Progress          │   │
-│                             │  • Platform-aware paths:       │   │
-│                             │    - Windows: embedded Python  │   │
-│                             │    - Mac: venv or system Py3.11│   │
-│                             └────────────────────────────────┘   │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-                               │ WebSocket/WebRTC :31415
-                               │ 
-                               ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  Foundry VTT                                                     │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  foundry-mcp-bridge Module                                 │  │
-│  │  • WebSocket Client (connects to :31415)                   │  │
-│  │  • Map Generation UI                                       │  │
-│  │  • Progress Display                                        │  │
-│  │  • Scene Creation                                          │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-
 ```
 Claude Desktop ↔ MCP Protocol ↔ MCP Server ↔ WebSocket ↔ Foundry Module ↔ Foundry VTT
                                      ↓
