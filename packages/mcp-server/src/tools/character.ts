@@ -83,6 +83,67 @@ export class CharacterTools {
           },
         },
       },
+      {
+        name: 'use-item',
+        description: 'Use an item on a character (cast spell, use ability, activate feature, consume item). Opens the item dialog in Foundry VTT for the GM to configure options and confirm. Optionally specify targets by name. Returns immediately with status "initiated" - tell the user to check Foundry for any dialogs. Works across systems: D&D 5e, PF2e, DSA5. Use get-character or search-character-items first to see available items/spells.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorIdentifier: {
+              type: 'string',
+              description: 'Character using the item (name or ID)',
+            },
+            itemIdentifier: {
+              type: 'string',
+              description: 'Item name or ID (spell, feat, equipment, consumable, etc.)',
+            },
+            targets: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Target character/token names or IDs. Use ["self"] to target the caster. If omitted, GM selects targets in Foundry.',
+            },
+            consume: {
+              type: 'boolean',
+              description: 'Whether to consume charges/uses (default: true)',
+            },
+            spellLevel: {
+              type: 'number',
+              description: 'For spells: cast at a higher level than base (D&D 5e upcasting)',
+            },
+          },
+          required: ['actorIdentifier', 'itemIdentifier'],
+        },
+      },
+      {
+        name: 'search-character-items',
+        description: 'Search within a character\'s items, spells, actions, and effects. More token-efficient than get-character when you need specific items. Supports text search (name/description) and type filtering. Returns matching items with full details including targeting info for spells. Use this to find specific spells, equipment, feats, or abilities without loading the entire character.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            characterIdentifier: {
+              type: 'string',
+              description: 'Character name or ID to search within',
+            },
+            query: {
+              type: 'string',
+              description: 'Text to search for in item names and descriptions (case-insensitive). Leave empty to return all items of specified type.',
+            },
+            type: {
+              type: 'string',
+              description: 'Filter by item type: "spell", "weapon", "armor", "equipment", "consumable", "feat", "feature", "action", "effect", or system-specific types. Leave empty to search all types.',
+            },
+            category: {
+              type: 'string',
+              description: 'Additional category filter. For spells: "cantrip", "prepared", "innate", "focus". For items: "equipped", "carried", "invested".',
+            },
+            limit: {
+              type: 'number',
+              description: 'Maximum number of results to return (default: 20)',
+            },
+          },
+          required: ['characterIdentifier'],
+        },
+      },
     ];
   }
 
@@ -255,6 +316,81 @@ export class CharacterTools {
     }
   }
 
+  async handleUseItem(args: any): Promise<any> {
+    const schema = z.object({
+      actorIdentifier: z.string().min(1, 'Actor identifier cannot be empty'),
+      itemIdentifier: z.string().min(1, 'Item identifier cannot be empty'),
+      targets: z.array(z.string()).optional(),
+      consume: z.boolean().optional(),
+      spellLevel: z.number().optional(),
+      skipDialog: z.boolean().optional(),
+    });
+
+    const { actorIdentifier, itemIdentifier, targets, consume, spellLevel, skipDialog } = schema.parse(args);
+
+    this.logger.info('Using item', { actorIdentifier, itemIdentifier, targets, consume, spellLevel, skipDialog });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.useItem', {
+        actorIdentifier,
+        itemIdentifier,
+        targets,
+        options: {
+          consume: consume ?? true,
+          spellLevel,
+          skipDialog: skipDialog ?? true, // Default to skipping dialogs for MCP automation
+        },
+      });
+
+      this.logger.debug('Successfully used item', {
+        actorName: result.actorName,
+        itemName: result.itemName,
+        targets: result.targets,
+      });
+
+      return result;
+
+    } catch (error) {
+      this.logger.error('Failed to use item', error);
+      throw new Error(`Failed to use item "${itemIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async handleSearchCharacterItems(args: any): Promise<any> {
+    const schema = z.object({
+      characterIdentifier: z.string().min(1, 'Character identifier cannot be empty'),
+      query: z.string().optional(),
+      type: z.string().optional(),
+      category: z.string().optional(),
+      limit: z.number().optional(),
+    });
+
+    const { characterIdentifier, query, type, category, limit } = schema.parse(args);
+
+    this.logger.info('Searching character items', { characterIdentifier, query, type, category, limit });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.searchCharacterItems', {
+        characterIdentifier,
+        query,
+        type,
+        category,
+        limit: limit ?? 20,
+      });
+
+      this.logger.debug('Successfully searched character items', {
+        characterName: result.characterName,
+        matchCount: result.matches?.length || 0,
+      });
+
+      return result;
+
+    } catch (error) {
+      this.logger.error('Failed to search character items', error);
+      throw new Error(`Failed to search items for "${characterIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   private async formatCharacterResponse(characterData: any): Promise<any> {
     const response: any = {
       id: characterData.id,
@@ -272,9 +408,94 @@ export class CharacterTools {
       response.actions = this.formatActions(characterData.actions);
     }
 
+    // Add spellcasting data with spell lists
+    if (characterData.spellcasting && characterData.spellcasting.length > 0) {
+      response.spellcasting = this.formatSpellcasting(characterData.spellcasting);
+    }
+
     // Exclude itemVariants and itemToggles - these are verbose and can be fetched via get-character-entity if needed
 
     return response;
+  }
+
+  private formatSpellcasting(spellcastingEntries: any[]): any[] {
+    return spellcastingEntries.map(entry => {
+      const formatted: any = {
+        name: entry.name,
+        type: entry.type,
+      };
+
+      // Include tradition for PF2e (arcane, divine, primal, occult)
+      if (entry.tradition) {
+        formatted.tradition = entry.tradition;
+      }
+
+      // Include spellcasting ability
+      if (entry.ability) {
+        formatted.ability = entry.ability;
+      }
+
+      // Include DC and attack bonus
+      if (entry.dc) {
+        formatted.dc = entry.dc;
+      }
+      if (entry.attack) {
+        formatted.attack = entry.attack;
+      }
+
+      // Include spell slots if available
+      if (entry.slots && Object.keys(entry.slots).length > 0) {
+        formatted.slots = entry.slots;
+      }
+
+      // Format spells - minimal data for browsing, use get-character-entity for full details
+      if (entry.spells && entry.spells.length > 0) {
+        formatted.spells = entry.spells.map((spell: any) => {
+          const spellData: any = {
+            id: spell.id,
+            name: spell.name,
+            level: spell.level,
+          };
+
+          // Only include prepared status if it's false (assumed prepared by default)
+          if (spell.prepared === false) {
+            spellData.prepared = false;
+          }
+
+          // Include expended status if spell slot has been used
+          if (spell.expended) {
+            spellData.expended = true;
+          }
+
+          // Include traits for PF2e spells (for filtering by damage type, etc.)
+          if (spell.traits && spell.traits.length > 0) {
+            spellData.traits = spell.traits;
+          }
+
+          // Include action cost
+          if (spell.actionCost) {
+            spellData.actionCost = spell.actionCost;
+          }
+
+          // Include targeting info - helps Claude decide whether to specify targets
+          if (spell.range) {
+            spellData.range = spell.range;
+          }
+          if (spell.target) {
+            spellData.target = spell.target;
+          }
+          if (spell.area) {
+            spellData.area = spell.area;
+          }
+
+          return spellData;
+        });
+
+        formatted.spellCount = entry.spells.length;
+      }
+
+      return formatted;
+    });
   }
 
   private formatActions(actions: any[]): any[] {

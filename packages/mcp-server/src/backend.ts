@@ -1417,6 +1417,18 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'use-item':
+
+                  result = await characterTools.handleUseItem(args);
+
+                  break;
+
+                case 'search-character-items':
+
+                  result = await characterTools.handleSearchCharacterItems(args);
+
+                  break;
+
                 // Compendium tools
 
                 case 'search-compendium':

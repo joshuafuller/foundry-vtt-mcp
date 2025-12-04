@@ -1,3 +1,37 @@
+## v0.6.2 (2025-12-03)
+
+### New Features
+
+- **Spellcasting Data Extraction** (Issue #14)
+  - `get-character` now returns full spellcasting entries with spell lists
+  - PF2e: Spellcasting entries with traditions, DC, attack, slots, prepared/expended status
+  - D&D 5e: Class-based spellcasting with spell slots and prepared spells
+  - DSA5: Zauber (spells), Liturgien, Zeremonien, Rituale with AsP/KaP tracking
+  - **Spell Targeting Info**: Each spell now includes `range`, `target`, and `area` fields
+    - D&D 5e: Range (Self/Touch/60 ft), target type (1 creature/self/area), area template
+    - PF2e: Range, descriptive target, area type (emanation/cone/burst)
+    - DSA5: Reichweite, Zielkategorie, Wirkungsbereich
+
+- **Use Item Tool** (`use-item`)
+  - Cast spells, use abilities, activate features, consume items
+  - Works across systems: D&D 5e, PF2e, DSA5
+  - Supports spell upcasting (D&D 5e)
+  - Proper resource consumption (spell slots, charges, consumables)
+  - GM-only with character targeting
+  - **Target Selection**: Specify targets by name or use `["self"]` to target caster
+    - Example: "Have Clark cast Magic Missile on the Goblin"
+    - Example: "Have Vitch use a healing potion on himself"
+    - Targets set via Foundry's targeting system before item use
+
+- **Search Character Items Tool** (`search-character-items`)
+  - Token-efficient item search within a character's inventory
+  - Filter by type (weapon, spell, feat, equipment, etc.)
+  - Filter by category (items, spells, features, all)
+  - Text search across item names and descriptions
+  - Returns compact results without full descriptions
+
+---
+
 ## v0.6.1 (2025-12-03)
 
 ### New Features
